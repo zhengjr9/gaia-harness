@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	provider "github.com/zhengjiarui/gaia-ai-provider"
 	"github.com/zhengjiarui/gaia-harness/agent"
@@ -19,7 +20,14 @@ type Loader interface {
 type Filesystem struct{ Root string }
 
 func (f Filesystem) List(_ context.Context) ([]Skill, error) {
-	entries, err := os.ReadDir(f.Root)
+	root, err := filepath.EvalSymlinks(f.Root)
+	if os.IsNotExist(err) {
+		return []Skill{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(root)
 	if os.IsNotExist(err) {
 		return []Skill{}, nil
 	}
@@ -31,11 +39,20 @@ func (f Filesystem) List(_ context.Context) ([]Skill, error) {
 		if !e.IsDir() {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(f.Root, e.Name(), "SKILL.md"))
+		path := filepath.Join(root, e.Name(), "SKILL.md")
+		resolved, err := filepath.EvalSymlinks(path)
 		if err != nil {
 			continue
 		}
-		out = append(out, Skill{Name: e.Name(), Path: filepath.Join(f.Root, e.Name()), Instructions: string(data)})
+		rel, err := filepath.Rel(root, resolved)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		data, err := os.ReadFile(resolved)
+		if err != nil {
+			continue
+		}
+		out = append(out, Skill{Name: e.Name(), Path: filepath.Join(root, e.Name()), Instructions: string(data)})
 	}
 	return out, nil
 }
