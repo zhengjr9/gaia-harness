@@ -16,6 +16,10 @@ type Runner struct {
 }
 
 func (r Runner) Run(ctx context.Context, id string, user provider.Message) (*provider.Response, error) {
+	return r.RunWithEvents(ctx, id, user, nil)
+}
+
+func (r Runner) RunWithEvents(ctx context.Context, id string, user provider.Message, observer agent.EventObserver) (*provider.Response, error) {
 	if r.Service.Store == nil || r.NewAgent == nil {
 		return nil, fmt.Errorf("runner requires service store and agent factory")
 	}
@@ -30,7 +34,7 @@ func (r Runner) Run(ctx context.Context, id string, user provider.Message) (*pro
 	if err != nil {
 		return nil, err
 	}
-	run, err := a.Run(ctx, record.Messages)
+	run, err := a.RunWithEvents(ctx, record.Messages, observer)
 	if err != nil {
 		return nil, err
 	}

@@ -25,6 +25,11 @@ type Config struct {
 	Retries    int
 	RetryDelay time.Duration
 }
+
+// EventObserver receives provider stream events while a turn is running.
+// A nil observer keeps the synchronous completion path for callers that only
+// need the final response.
+type EventObserver func(provider.Event)
 type Agent struct {
 	cfg   Config
 	tools map[string]Tool
@@ -66,6 +71,12 @@ func (a *Agent) Complete(ctx context.Context, messages []provider.Message) (*pro
 // Run executes a turn loop and returns every generated assistant/tool message.
 // Persisting this trace is required for correct continuation after a restart.
 func (a *Agent) Run(ctx context.Context, messages []provider.Message) (RunResult, error) {
+	return a.RunWithEvents(ctx, messages, nil)
+}
+
+// RunWithEvents executes the same durable tool loop as Run and optionally
+// exposes each provider stream event before the final trace is persisted.
+func (a *Agent) RunWithEvents(ctx context.Context, messages []provider.Message, observer EventObserver) (RunResult, error) {
 	trace := []provider.Message{}
 	for turn := 0; turn < a.cfg.MaxTurns; turn++ {
 		req := provider.Request{Model: a.cfg.Model, System: a.cfg.System, Messages: messages, Tools: a.definitions()}
@@ -74,7 +85,7 @@ func (a *Agent) Run(ctx context.Context, messages []provider.Message) (RunResult
 				return RunResult{}, err
 			}
 		}
-		res, err := a.completeWithRetry(ctx, req)
+		res, err := a.completeWithRetry(ctx, req, observer)
 		if err != nil {
 			return RunResult{}, err
 		}
@@ -110,10 +121,10 @@ func (a *Agent) Run(ctx context.Context, messages []provider.Message) (RunResult
 	return RunResult{Messages: trace}, fmt.Errorf("agent exceeded max turns")
 }
 
-func (a *Agent) completeWithRetry(ctx context.Context, req provider.Request) (*provider.Response, error) {
+func (a *Agent) completeWithRetry(ctx context.Context, req provider.Request, observer EventObserver) (*provider.Response, error) {
 	var err error
 	for attempt := 0; attempt <= a.cfg.Retries; attempt++ {
-		res, callErr := a.cfg.Registry.Complete(ctx, req)
+		res, callErr := a.complete(ctx, req, observer)
 		err = callErr
 		if err == nil {
 			return res, nil
@@ -127,6 +138,37 @@ func (a *Agent) completeWithRetry(ctx context.Context, req provider.Request) (*p
 		}
 	}
 	return nil, err
+}
+
+func (a *Agent) complete(ctx context.Context, req provider.Request, observer EventObserver) (*provider.Response, error) {
+	if observer == nil {
+		return a.cfg.Registry.Complete(ctx, req)
+	}
+	providerClient, ok := a.cfg.Registry.Get(req.Model.Provider)
+	if !ok {
+		return nil, fmt.Errorf("unknown provider %q", req.Model.Provider)
+	}
+	events, err := providerClient.Stream(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	var response *provider.Response
+	for event := range events {
+		observer(event)
+		if event.Response != nil && (event.Type == provider.EventDone || event.Type == provider.EventError) {
+			response = event.Response
+		}
+	}
+	if response == nil {
+		return nil, fmt.Errorf("provider stream ended without a response")
+	}
+	if response.Error != nil || response.StopReason == provider.StopReasonError {
+		if response.Error != nil {
+			return nil, response.Error
+		}
+		return nil, fmt.Errorf("provider stream failed")
+	}
+	return response, nil
 }
 func (a *Agent) definitions() []provider.Tool {
 	out := make([]provider.Tool, 0, len(a.tools))

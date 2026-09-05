@@ -108,7 +108,10 @@ func (s *Server) nativeConnection(ctx context.Context, conn *websocket.Conn) err
 			if message.Type != "request" {
 				continue
 			}
-			result, commandErr := s.commandForNative(ctx, message.Request)
+			progress := s.nativeProgressEmitter(message.Request.SessionID, func(serverMessage nativeServerMessage) error {
+				return s.writeNative(conn, serverMessage)
+			})
+			result, commandErr := s.commandForNative(ctx, message.Request, progress)
 			ok := commandErr == nil
 			response := nativeServerMessage{Type: "response", ID: message.ID, OK: &ok}
 			if commandErr == nil {
@@ -140,7 +143,7 @@ func nativeSessionFromResult(result any) (nativeSessionSnapshot, bool) {
 	return snapshot, ok
 }
 
-func (s *Server) commandForNative(ctx context.Context, command nativeCommand) (any, error) {
+func (s *Server) commandForNative(ctx context.Context, command nativeCommand, observer func(provider.Event)) (any, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://pi.local", nil)
 	if err != nil {
 		return nil, err
@@ -156,7 +159,7 @@ func (s *Server) commandForNative(ctx context.Context, command nativeCommand) (a
 		snapshot, err := s.get(request, command.SessionID)
 		return map[string]any{"command": "attach", "session": nativeSession(snapshot)}, err
 	case "prompt", "steer":
-		snapshot, err := s.nativePrompt(request, command)
+		snapshot, err := s.nativePrompt(request, command, observer)
 		return map[string]any{"command": command.Command, "session": nativeSession(snapshot)}, err
 	case "abort":
 		snapshot, err := s.get(request, command.SessionID)
@@ -183,12 +186,140 @@ func (s *Server) commandForNative(ctx context.Context, command nativeCommand) (a
 	}
 }
 
-func (s *Server) nativePrompt(r *http.Request, command nativeCommand) (SessionSnapshot, error) {
-	_, err := s.prompt(r, Command{Command: command.Command, SessionID: command.SessionID, Text: command.Text})
+func (s *Server) nativePrompt(r *http.Request, command nativeCommand, observer func(provider.Event)) (SessionSnapshot, error) {
+	if s.Runner == nil {
+		return SessionSnapshot{}, fmt.Errorf("agent runner is not configured")
+	}
+	if command.SessionID == "" {
+		return SessionSnapshot{}, fmt.Errorf("sessionId is required")
+	}
+	_, err := s.Runner.RunWithEvents(r.Context(), command.SessionID, provider.Message{Role: provider.RoleUser, Content: []provider.Content{{Text: command.Text}}}, observer)
 	if err != nil {
 		return SessionSnapshot{}, err
 	}
 	return s.get(r, command.SessionID)
+}
+
+func (s *Server) nativeProgressEmitter(sessionID string, write func(nativeServerMessage) error) func(provider.Event) {
+	state := nativeProgressState{sessionID: sessionID}
+	return func(event provider.Event) {
+		if sessionID == "" {
+			return
+		}
+		state.apply(event)
+		if state.item.ID == "" {
+			return
+		}
+		_ = write(nativeServerMessage{Type: "event", Event: map[string]any{
+			"type": "session_progress", "sessionId": sessionID, "progress": state.progress,
+		}})
+	}
+}
+
+type nativeProgressState struct {
+	sessionID string
+	item      nativeTranscriptItem
+	progress  map[string]any
+	sequence  int
+}
+
+func (s *nativeProgressState) apply(event provider.Event) {
+	if event.Type == provider.EventStart {
+		s.sequence++
+		id := fmt.Sprintf("stream-%s-%d", s.sessionID, s.sequence)
+		model := ModelRef{}
+		if event.Response != nil {
+			model = ModelRef{Provider: event.Response.Provider, ID: event.Response.Model}
+		}
+		s.item = nativeTranscriptItem{ID: id, Role: string(provider.RoleAssistant), Content: []map[string]any{}, Model: &model, Status: "streaming", Timestamp: time.Now().UnixMilli()}
+		s.progress = map[string]any{"type": "item_started", "item": s.item}
+		return
+	}
+	if s.item.ID == "" {
+		return
+	}
+	if event.Type == provider.EventTextDelta {
+		s.appendText(event.Delta)
+	} else if event.Type == provider.EventThinkingDelta {
+		s.appendThinking(event.Delta)
+	} else if event.Type == provider.EventToolCallDelta && event.ToolCall != nil {
+		s.appendToolCall(event.ToolCall, event.Delta)
+	} else if event.Type == provider.EventDone && event.Response != nil {
+		s.item.Content = nativeContent(event.Response.Content)
+		s.item.Status = "complete"
+		s.item.StopReason = nativeStopReason(event.Response.StopReason)
+		s.progress = map[string]any{"type": "item_finished", "item": s.item}
+		return
+	} else if event.Type == provider.EventError {
+		s.item.Status = "error"
+		s.item.StopReason = "error"
+		if event.Err != nil {
+			s.item.ErrorMessage = event.Err.Error()
+		}
+		s.progress = map[string]any{"type": "item_finished", "item": s.item}
+		return
+	} else {
+		return
+	}
+	s.progress = map[string]any{"type": "item_updated", "item": s.item}
+}
+
+func (s *nativeProgressState) appendText(delta string) {
+	if len(s.item.Content) == 0 || s.item.Content[len(s.item.Content)-1]["type"] != "text" {
+		s.item.Content = append(s.item.Content, map[string]any{"type": "text", "text": ""})
+	}
+	part := s.item.Content[len(s.item.Content)-1]
+	part["text"] = part["text"].(string) + delta
+}
+
+func (s *nativeProgressState) appendThinking(delta string) {
+	if len(s.item.Content) == 0 || s.item.Content[len(s.item.Content)-1]["type"] != "thinking" {
+		s.item.Content = append(s.item.Content, map[string]any{"type": "thinking", "thinking": ""})
+	}
+	part := s.item.Content[len(s.item.Content)-1]
+	part["thinking"] = part["thinking"].(string) + delta
+}
+
+func (s *nativeProgressState) appendToolCall(call *provider.ToolCall, delta string) {
+	if len(s.item.Content) == 0 || s.item.Content[len(s.item.Content)-1]["type"] != "toolCall" {
+		s.item.Content = append(s.item.Content, map[string]any{"type": "toolCall", "toolCallId": call.ID, "toolName": call.Name, "input": ""})
+	}
+	part := s.item.Content[len(s.item.Content)-1]
+	part["toolCallId"], part["toolName"] = call.ID, call.Name
+	part["input"] = part["input"].(string) + delta
+}
+
+func nativeStopReason(reason provider.StopReason) string {
+	switch reason {
+	case provider.StopReasonLength:
+		return "length"
+	case provider.StopReasonToolUse:
+		return "toolUse"
+	default:
+		return "stop"
+	}
+}
+
+func nativeContent(content []provider.Content) []map[string]any {
+	out := make([]map[string]any, 0, len(content))
+	for _, item := range content {
+		switch {
+		case item.Text != "":
+			out = append(out, map[string]any{"type": "text", "text": item.Text})
+		case item.Thinking != "":
+			out = append(out, map[string]any{"type": "thinking", "thinking": item.Thinking})
+		case item.ToolCall != nil:
+			input := any(item.ToolCall.Arguments)
+			var decoded map[string]any
+			if json.Unmarshal([]byte(item.ToolCall.Arguments), &decoded) == nil {
+				input = decoded
+			}
+			out = append(out, map[string]any{"type": "toolCall", "toolCallId": item.ToolCall.ID, "toolName": item.ToolCall.Name, "input": input})
+		case item.ToolResult != nil:
+			out = append(out, map[string]any{"type": "text", "text": item.ToolResult.Content})
+		}
+	}
+	return out
 }
 
 func (s *Server) setModel(r *http.Request, id string, model ModelRef) error {
@@ -295,6 +426,7 @@ type nativeTranscriptItem struct {
 	ResponseModel string           `cbor:"responseModel,omitempty"`
 	Status        string           `cbor:"status,omitempty"`
 	StopReason    string           `cbor:"stopReason,omitempty"`
+	ErrorMessage  string           `cbor:"errorMessage,omitempty"`
 	ToolCallID    string           `cbor:"toolCallId,omitempty"`
 	ToolName      string           `cbor:"toolName,omitempty"`
 	Input         map[string]any   `cbor:"input,omitempty"`
