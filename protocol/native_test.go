@@ -16,6 +16,7 @@ func TestNativeToolTranscriptAlwaysIncludesIsError(t *testing.T) {
 		ToolName:   "write_file",
 		Input:      map[string]any{"path": "hello.txt"},
 		Content:    []map[string]any{{"type": "text", "text": "ok"}},
+		IsError:    boolPtr(false),
 		Status:     "complete",
 		Timestamp:  1,
 	}
@@ -34,6 +35,36 @@ func TestNativeToolTranscriptAlwaysIncludesIsError(t *testing.T) {
 	}
 	if value != false {
 		t.Fatalf("isError=%v, want false", value)
+	}
+}
+
+func TestNativeAssistantTranscriptUsesProtocolModelKeys(t *testing.T) {
+	item := nativeTranscriptItem{
+		ID:        "assistant-1",
+		Role:      "assistant",
+		Content:   []map[string]any{{"type": "text", "text": "hello"}},
+		Model:     &ModelRef{Provider: "ark", ID: "deepseek-v4-flash"},
+		Status:    "streaming",
+		Timestamp: 1,
+	}
+
+	encoded, err := cbor.Marshal(item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := cbor.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	model, ok := decoded["model"].(map[any]any)
+	if !ok {
+		t.Fatalf("model=%#v, want CBOR map", decoded["model"])
+	}
+	if model["provider"] != "ark" || model["id"] != "deepseek-v4-flash" {
+		t.Fatalf("model=%#v, want protocol keys provider/id", model)
+	}
+	if _, ok := decoded["isError"]; ok {
+		t.Fatal("assistant transcript item must not contain tool-only isError field")
 	}
 }
 

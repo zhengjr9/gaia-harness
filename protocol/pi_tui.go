@@ -20,8 +20,8 @@ import (
 const Version = 1
 
 type ModelRef struct {
-	Provider string `json:"provider"`
-	ID       string `json:"id"`
+	Provider string `json:"provider" cbor:"provider"`
+	ID       string `json:"id" cbor:"id"`
 }
 type Command struct {
 	Command       string    `json:"command"`
