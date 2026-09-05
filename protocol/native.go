@@ -541,7 +541,22 @@ func nativeSnapshot(snapshot ServerSnapshot) *nativeServerSnapshot {
 		if api == "" {
 			api = "openai-completions"
 		}
-		models = append(models, nativeModel{Provider: model.Provider, ID: model.ID, Name: model.Name, API: api, Reasoning: model.Reasoning, Input: input, ContextWindow: model.ContextWindow, MaxTokens: model.MaxTokens, Cost: map[string]float64{"input": model.Cost.Input, "output": model.Cost.Output, "cacheRead": model.Cost.CacheRead, "cacheWrite": model.Cost.CacheWrite}, SupportedThinkingLevels: []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}, Authenticated: true})
+		contextWindow := model.ContextWindow
+		if contextWindow < 1 {
+			contextWindow = 128000
+		}
+		maxTokens := model.MaxTokens
+		if maxTokens < 1 {
+			maxTokens = 8192
+		}
+		models = append(models, nativeModel{Provider: model.Provider, ID: model.ID, Name: model.Name, API: api, Reasoning: model.Reasoning, Input: input, ContextWindow: contextWindow, MaxTokens: maxTokens, Cost: map[string]float64{"input": nonNegative(model.Cost.Input), "output": nonNegative(model.Cost.Output), "cacheRead": nonNegative(model.Cost.CacheRead), "cacheWrite": nonNegative(model.Cost.CacheWrite)}, SupportedThinkingLevels: []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}, Authenticated: true})
 	}
 	return &nativeServerSnapshot{ServerID: snapshot.ServerID, ProtocolVersion: snapshot.ProtocolVersion, Revision: snapshot.Revision, Sessions: snapshot.Sessions, Models: models}
+}
+
+func nonNegative(value float64) float64 {
+	if value < 0 {
+		return 0
+	}
+	return value
 }
