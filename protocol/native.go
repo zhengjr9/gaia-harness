@@ -494,8 +494,10 @@ type nativeTranscriptItem struct {
 	ToolCallID    string           `cbor:"toolCallId,omitempty"`
 	ToolName      string           `cbor:"toolName,omitempty"`
 	Input         map[string]any   `cbor:"input,omitempty"`
-	IsError       bool             `cbor:"isError,omitempty"`
-	Timestamp     int64            `cbor:"timestamp"`
+	// isError is required by pi-protocol for every tool transcript item,
+	// including successful and running items where its value is false.
+	IsError   bool  `cbor:"isError"`
+	Timestamp int64 `cbor:"timestamp"`
 }
 
 func nativeSession(snapshot SessionSnapshot) nativeSessionSnapshot {
