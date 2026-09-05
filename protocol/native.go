@@ -117,11 +117,27 @@ func (s *Server) nativeConnection(ctx context.Context, conn *websocket.Conn) err
 			if commandErr != nil {
 				response.Error = &ProtocolError{Code: "internal_error", Message: commandErr.Error()}
 			}
+			if commandErr == nil {
+				if snapshot, ok := nativeSessionFromResult(result); ok {
+					if err := s.writeNative(conn, nativeServerMessage{Type: "event", Event: map[string]any{"type": "session_snapshot", "snapshot": snapshot}}); err != nil {
+						return err
+					}
+				}
+			}
 			if err := s.writeNative(conn, response); err != nil {
 				return err
 			}
 		}
 	}
+}
+
+func nativeSessionFromResult(result any) (nativeSessionSnapshot, bool) {
+	value, ok := result.(map[string]any)
+	if !ok {
+		return nativeSessionSnapshot{}, false
+	}
+	snapshot, ok := value["session"].(nativeSessionSnapshot)
+	return snapshot, ok
 }
 
 func (s *Server) commandForNative(ctx context.Context, command nativeCommand) (any, error) {
@@ -145,6 +161,21 @@ func (s *Server) commandForNative(ctx context.Context, command nativeCommand) (a
 	case "abort":
 		snapshot, err := s.get(request, command.SessionID)
 		return map[string]any{"command": "abort", "session": nativeSession(snapshot)}, err
+	case "set_model":
+		if command.Model == nil || command.Model.Provider == "" || command.Model.ID == "" {
+			return nil, fmt.Errorf("model is required")
+		}
+		if err := s.setModel(request, command.SessionID, *command.Model); err != nil {
+			return nil, err
+		}
+		snapshot, err := s.get(request, command.SessionID)
+		return map[string]any{"command": "set_model", "session": nativeSession(snapshot)}, err
+	case "set_thinking":
+		if err := s.setThinking(request.Context(), command.SessionID, command.ThinkingLevel); err != nil {
+			return nil, err
+		}
+		snapshot, err := s.get(request, command.SessionID)
+		return map[string]any{"command": "set_thinking", "session": nativeSession(snapshot)}, err
 	case "detach":
 		return map[string]any{"command": "detach", "sessionId": command.SessionID}, nil
 	default:
@@ -158,6 +189,50 @@ func (s *Server) nativePrompt(r *http.Request, command nativeCommand) (SessionSn
 		return SessionSnapshot{}, err
 	}
 	return s.get(r, command.SessionID)
+}
+
+func (s *Server) setModel(r *http.Request, id string, model ModelRef) error {
+	if s.Registry == nil {
+		return fmt.Errorf("model registry is not configured")
+	}
+	selected, ok := s.Registry.Model(model.Provider, model.ID)
+	if !ok {
+		return fmt.Errorf("unknown model %s/%s", model.Provider, model.ID)
+	}
+	if err := s.Sessions.Store.UpdateModel(r.Context(), id, selected); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	state := s.states[id]
+	state.Model = selected
+	state.Metadata.UpdatedAt = time.Now().UnixMilli()
+	s.states[id] = state
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *Server) setThinking(ctx context.Context, id, thinking string) error {
+	switch thinking {
+	case "off", "minimal", "low", "medium", "high", "xhigh", "max":
+	default:
+		return fmt.Errorf("invalid thinking level %q", thinking)
+	}
+	s.mu.Lock()
+	state, ok := s.states[id]
+	if !ok {
+		s.mu.Unlock()
+		record, err := s.Sessions.Store.Get(ctx, id)
+		if err != nil {
+			return err
+		}
+		state = sessionState{Metadata: SessionMetadata{ID: id, CWD: record.CWD, CreatedAt: record.CreatedAt.UnixMilli(), UpdatedAt: record.UpdatedAt.UnixMilli()}, Model: record.Model}
+		s.mu.Lock()
+	}
+	state.ThinkingLevel = thinking
+	state.Metadata.UpdatedAt = time.Now().UnixMilli()
+	s.states[id] = state
+	s.mu.Unlock()
+	return nil
 }
 
 func (s *Server) writeNative(conn *websocket.Conn, message nativeServerMessage) error {
@@ -260,6 +335,7 @@ func nativeSession(snapshot SessionSnapshot) nativeSessionSnapshot {
 			item.ToolName = message.ToolCallID
 			item.Input = map[string]any{}
 			item.IsError = false
+			item.Status = "complete"
 		}
 		for _, contentItem := range message.Content {
 			if contentItem.ToolResult != nil {

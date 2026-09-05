@@ -27,6 +27,7 @@ type Record struct {
 type Store interface {
 	Create(context.Context, Record) error
 	Get(context.Context, string) (Record, error)
+	UpdateModel(context.Context, string, provider.Model) error
 	Append(context.Context, string, provider.Message) error
 	ReplaceMessages(context.Context, string, []provider.Message) error
 }
@@ -105,6 +106,18 @@ func (s *MemoryStore) Get(_ context.Context, id string) (Record, error) {
 		return Record{}, ErrNotFound
 	}
 	return clone(r), nil
+}
+func (s *MemoryStore) UpdateModel(_ context.Context, id string, model provider.Model) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.records[id]
+	if !ok {
+		return ErrNotFound
+	}
+	r.Model = model
+	r.UpdatedAt = time.Now().UTC()
+	s.records[id] = r
+	return nil
 }
 func (s *MemoryStore) List(_ context.Context) ([]Record, error) {
 	s.mu.RLock()

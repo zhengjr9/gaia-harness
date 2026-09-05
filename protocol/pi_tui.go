@@ -93,9 +93,10 @@ type EventEnvelope struct {
 	Event any    `json:"event"`
 }
 type sessionState struct {
-	Metadata SessionMetadata
-	Model    provider.Model
-	Name     string
+	Metadata      SessionMetadata
+	Model         provider.Model
+	Name          string
+	ThinkingLevel string
 }
 
 type Server struct {
@@ -216,7 +217,11 @@ func (s *Server) create(r *http.Request, c Command) (SessionSnapshot, error) {
 	}
 	now := time.Now().UnixMilli()
 	s.mu.Lock()
-	s.states[id] = sessionState{Metadata: SessionMetadata{ID: id, CWD: cwd, CreatedAt: now, UpdatedAt: now}, Model: model, Name: c.Name}
+	thinkingLevel := c.ThinkingLevel
+	if thinkingLevel == "" {
+		thinkingLevel = "off"
+	}
+	s.states[id] = sessionState{Metadata: SessionMetadata{ID: id, CWD: cwd, CreatedAt: now, UpdatedAt: now}, Model: model, Name: c.Name, ThinkingLevel: thinkingLevel}
 	s.mu.Unlock()
 	return s.get(r, id)
 }
@@ -241,7 +246,11 @@ func (s *Server) get(r *http.Request, id string) (SessionSnapshot, error) {
 	s.mu.RLock()
 	state := s.states[id]
 	s.mu.RUnlock()
-	return SessionSnapshot{ID: id, Name: state.Name, CWD: record.CWD, CreatedAt: record.CreatedAt.UnixMilli(), UpdatedAt: record.UpdatedAt.UnixMilli(), Phase: "idle", Model: ModelRef{Provider: record.Model.Provider, ID: record.Model.ID}, ThinkingLevel: "off", Attached: true, Transcript: record.Messages}, nil
+	thinkingLevel := state.ThinkingLevel
+	if thinkingLevel == "" {
+		thinkingLevel = "off"
+	}
+	return SessionSnapshot{ID: id, Name: state.Name, CWD: record.CWD, CreatedAt: record.CreatedAt.UnixMilli(), UpdatedAt: record.UpdatedAt.UnixMilli(), Phase: "idle", Model: ModelRef{Provider: record.Model.Provider, ID: record.Model.ID}, ThinkingLevel: thinkingLevel, Attached: true, Transcript: record.Messages}, nil
 }
 func (s *Server) list(ctx context.Context) map[string]any {
 	s.mu.RLock()

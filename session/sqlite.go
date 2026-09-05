@@ -48,6 +48,24 @@ func (s *SQLiteStore) Get(ctx context.Context, id string) (Record, error) {
 	r.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
 	return r, nil
 }
+func (s *SQLiteStore) UpdateModel(ctx context.Context, id string, model provider.Model) error {
+	encoded, err := json.Marshal(model)
+	if err != nil {
+		return err
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE sessions SET model_json=?, updated_at=? WHERE id=?`, encoded, time.Now().UTC().Format(time.RFC3339Nano), id)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
 func (s *SQLiteStore) List(ctx context.Context) ([]Record, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id FROM sessions ORDER BY created_at`)
 	if err != nil {

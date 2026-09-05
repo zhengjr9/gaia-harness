@@ -41,6 +41,24 @@ func (s *PostgresStore) Get(ctx context.Context, id string) (Record, error) {
 	}
 	return r, nil
 }
+func (s *PostgresStore) UpdateModel(ctx context.Context, id string, model provider.Model) error {
+	encoded, err := json.Marshal(model)
+	if err != nil {
+		return err
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE sessions SET model_json=$1, updated_at=$2 WHERE id=$3`, encoded, time.Now().UTC(), id)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
 func (s *PostgresStore) List(ctx context.Context) ([]Record, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id FROM sessions ORDER BY created_at`)
 	if err != nil {
