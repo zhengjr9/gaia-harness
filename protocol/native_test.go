@@ -9,12 +9,13 @@ import (
 )
 
 func TestNativeToolTranscriptAlwaysIncludesIsError(t *testing.T) {
+	input := map[string]any{"path": "hello.txt"}
 	item := nativeTranscriptItem{
 		ID:         "tool-1",
 		Role:       "tool",
 		ToolCallID: "call-1",
 		ToolName:   "write_file",
-		Input:      map[string]any{"path": "hello.txt"},
+		Input:      mapPtr(input),
 		Content:    []map[string]any{{"type": "text", "text": "ok"}},
 		IsError:    boolPtr(false),
 		Status:     "complete",

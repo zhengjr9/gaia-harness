@@ -268,7 +268,7 @@ func (s *nativeProgressState) apply(event provider.Event) {
 		s.sequence++
 		input := map[string]any{}
 		_ = json.Unmarshal([]byte(event.ToolCall.Arguments), &input)
-		s.item = nativeTranscriptItem{ID: fmt.Sprintf("tool-%s-%d", s.sessionID, s.sequence), Role: string(provider.RoleTool), Content: []map[string]any{}, ToolCallID: event.ToolCall.ID, ToolName: event.ToolCall.Name, Input: input, IsError: boolPtr(false), Status: "running", Timestamp: time.Now().UnixMilli()}
+		s.item = nativeTranscriptItem{ID: fmt.Sprintf("tool-%s-%d", s.sessionID, s.sequence), Role: string(provider.RoleTool), Content: []map[string]any{}, ToolCallID: event.ToolCall.ID, ToolName: event.ToolCall.Name, Input: mapPtr(input), IsError: boolPtr(false), Status: "running", Timestamp: time.Now().UnixMilli()}
 		s.progress = map[string]any{"type": "item_started", "item": s.item}
 		return
 	}
@@ -493,7 +493,7 @@ type nativeTranscriptItem struct {
 	ErrorMessage  string           `cbor:"errorMessage,omitempty"`
 	ToolCallID    string           `cbor:"toolCallId,omitempty"`
 	ToolName      string           `cbor:"toolName,omitempty"`
-	Input         map[string]any   `cbor:"input,omitempty"`
+	Input         *map[string]any  `cbor:"input,omitempty"`
 	// isError is required by pi-protocol for tool transcript items, including
 	// successful and running items where its value is false. It must be omitted
 	// for assistant and user transcript items.
@@ -502,6 +502,14 @@ type nativeTranscriptItem struct {
 }
 
 func nativeSession(snapshot SessionSnapshot) nativeSessionSnapshot {
+	toolCalls := make(map[string]provider.ToolCall)
+	for _, message := range snapshot.Transcript {
+		for _, content := range message.Content {
+			if content.ToolCall != nil {
+				toolCalls[content.ToolCall.ID] = *content.ToolCall
+			}
+		}
+	}
 	transcript := make([]nativeTranscriptItem, 0, len(snapshot.Transcript))
 	for index, message := range snapshot.Transcript {
 		content := make([]map[string]any, 0, len(message.Content))
@@ -531,20 +539,30 @@ func nativeSession(snapshot SessionSnapshot) nativeSessionSnapshot {
 		}
 		if message.Role == provider.RoleTool {
 			item.ToolCallID = message.ToolCallID
-			item.ToolName = message.ToolCallID
-			item.Input = map[string]any{}
+			call, ok := toolCalls[message.ToolCallID]
+			if ok {
+				item.ToolName = call.Name
+				input := map[string]any{}
+				_ = json.Unmarshal([]byte(call.Arguments), &input)
+				item.Input = mapPtr(input)
+			} else {
+				item.ToolName = message.ToolCallID
+				item.Input = mapPtr(map[string]any{})
+			}
 			item.IsError = boolPtr(false)
 			item.Status = "complete"
 		}
 		for _, contentItem := range message.Content {
 			if contentItem.ToolResult != nil {
-				item.ToolCallID = contentItem.ToolResult.ToolCallID
-				item.IsError = boolPtr(contentItem.ToolResult.IsError)
-			}
-			if contentItem.ToolCall != nil {
-				_ = json.Unmarshal([]byte(contentItem.ToolCall.Arguments), &item.Input)
-				item.ToolCallID = contentItem.ToolCall.ID
-				item.ToolName = contentItem.ToolCall.Name
+				if message.Role == provider.RoleTool {
+					item.ToolCallID = contentItem.ToolResult.ToolCallID
+					item.IsError = boolPtr(contentItem.ToolResult.IsError)
+					if contentItem.ToolResult.IsError {
+						item.Status = "error"
+					} else {
+						item.Status = "complete"
+					}
+				}
 			}
 		}
 		transcript = append(transcript, item)
@@ -553,6 +571,10 @@ func nativeSession(snapshot SessionSnapshot) nativeSessionSnapshot {
 }
 
 func boolPtr(value bool) *bool {
+	return &value
+}
+
+func mapPtr(value map[string]any) *map[string]any {
 	return &value
 }
 
