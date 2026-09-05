@@ -47,7 +47,18 @@ func main() {
 	if baseURL == "" {
 		baseURL = "https://ark.cn-beijing.volces.com/api/plan/v3"
 	}
-	registry := provider.NewRegistry(provider.NewOpenAI(provider.OpenAIConfig{ID: modelProvider, Name: modelProvider, BaseURL: baseURL, APIKey: os.Getenv("GAIA_API_KEY"), Models: []provider.Model{{ID: modelID, Name: modelID, Provider: modelProvider, ContextWindow: 128000, MaxTokens: 8192}}}))
+	providers := provider.BuiltinProviders()
+	knownProvider := false
+	for _, spec := range provider.BuiltinSpecs() {
+		if spec.ID == modelProvider {
+			knownProvider = true
+			break
+		}
+	}
+	if !knownProvider {
+		providers = append(providers, provider.NewOpenAI(provider.OpenAIConfig{ID: modelProvider, Name: modelProvider, BaseURL: baseURL, APIKey: os.Getenv("GAIA_API_KEY"), Models: []provider.Model{{ID: modelID, Name: modelID, Provider: modelProvider, ContextWindow: 128000, MaxTokens: 8192}}}))
+	}
+	registry := provider.NewRegistry(providers...)
 	service := session.Service{Store: store, Compressor: session.TokenCompressor{ReserveOutput: 8192, SummaryPrefix: "Earlier context was compacted; rely on the retained transcript."}}
 	runner := &session.Runner{Store: store, Service: service, NewAgent: func(record session.Record) (*agent.Agent, error) {
 		workspace := record.CWD
