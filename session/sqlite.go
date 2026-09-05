@@ -14,20 +14,24 @@ type SQLiteStore struct{ db *sql.DB }
 
 func NewSQLiteStore(db *sql.DB) (*SQLiteStore, error) {
 	s := &SQLiteStore{db: db}
-	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, model_json BLOB NOT NULL, system_prompt TEXT NOT NULL, messages_json BLOB NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`)
-	return s, err
+	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, cwd TEXT NOT NULL DEFAULT '', model_json BLOB NOT NULL, system_prompt TEXT NOT NULL, messages_json BLOB NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`)
+	if err != nil {
+		return s, err
+	}
+	_, _ = db.Exec(`ALTER TABLE sessions ADD COLUMN cwd TEXT NOT NULL DEFAULT ''`)
+	return s, nil
 }
 func (s *SQLiteStore) Create(ctx context.Context, r Record) error {
 	m, _ := json.Marshal(r.Messages)
 	model, _ := json.Marshal(r.Model)
-	_, err := s.db.ExecContext(ctx, `INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?)`, r.ID, r.WorkspaceID, model, r.System, m, r.CreatedAt.Format(time.RFC3339Nano), r.UpdatedAt.Format(time.RFC3339Nano))
+	_, err := s.db.ExecContext(ctx, `INSERT INTO sessions (id,workspace_id,cwd,model_json,system_prompt,messages_json,created_at,updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, r.ID, r.WorkspaceID, r.CWD, model, r.System, m, r.CreatedAt.Format(time.RFC3339Nano), r.UpdatedAt.Format(time.RFC3339Nano))
 	return err
 }
 func (s *SQLiteStore) Get(ctx context.Context, id string) (Record, error) {
 	var r Record
 	var model, messages []byte
 	var created, updated string
-	err := s.db.QueryRowContext(ctx, `SELECT id, workspace_id, model_json, system_prompt, messages_json, created_at, updated_at FROM sessions WHERE id = ?`, id).Scan(&r.ID, &r.WorkspaceID, &model, &r.System, &messages, &created, &updated)
+	err := s.db.QueryRowContext(ctx, `SELECT id, workspace_id, cwd, model_json, system_prompt, messages_json, created_at, updated_at FROM sessions WHERE id = ?`, id).Scan(&r.ID, &r.WorkspaceID, &r.CWD, &model, &r.System, &messages, &created, &updated)
 	if err == sql.ErrNoRows {
 		return Record{}, ErrNotFound
 	}
@@ -43,6 +47,26 @@ func (s *SQLiteStore) Get(ctx context.Context, id string) (Record, error) {
 	r.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 	r.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
 	return r, nil
+}
+func (s *SQLiteStore) List(ctx context.Context) ([]Record, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM sessions ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Record{}
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		r, err := s.Get(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 func (s *SQLiteStore) Append(ctx context.Context, id string, m provider.Message) error {
 	r, err := s.Get(ctx, id)

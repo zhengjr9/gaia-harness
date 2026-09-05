@@ -30,6 +30,11 @@ type Agent struct {
 	tools map[string]Tool
 }
 
+type RunResult struct {
+	Response *provider.Response
+	Messages []provider.Message
+}
+
 func New(cfg Config) (*Agent, error) {
 	if cfg.Registry == nil {
 		return nil, fmt.Errorf("registry is required")
@@ -51,41 +56,58 @@ func New(cfg Config) (*Agent, error) {
 }
 
 func (a *Agent) Complete(ctx context.Context, messages []provider.Message) (*provider.Response, error) {
+	result, err := a.Run(ctx, messages)
+	if err != nil {
+		return nil, err
+	}
+	return result.Response, nil
+}
+
+// Run executes a turn loop and returns every generated assistant/tool message.
+// Persisting this trace is required for correct continuation after a restart.
+func (a *Agent) Run(ctx context.Context, messages []provider.Message) (RunResult, error) {
+	trace := []provider.Message{}
 	for turn := 0; turn < a.cfg.MaxTurns; turn++ {
 		req := provider.Request{Model: a.cfg.Model, System: a.cfg.System, Messages: messages, Tools: a.definitions()}
 		for _, middleware := range a.cfg.Middleware {
 			if err := middleware.Before(ctx, &req); err != nil {
-				return nil, err
+				return RunResult{}, err
 			}
 		}
 		res, err := a.completeWithRetry(ctx, req)
 		if err != nil {
-			return nil, err
+			return RunResult{}, err
 		}
 		for _, middleware := range a.cfg.Middleware {
 			if err := middleware.After(ctx, res); err != nil {
-				return nil, err
+				return RunResult{}, err
 			}
 		}
-		messages = append(messages, provider.Message{Role: provider.RoleAssistant, Content: res.Content})
+		assistant := provider.Message{Role: provider.RoleAssistant, Content: res.Content}
+		messages = append(messages, assistant)
+		trace = append(trace, assistant)
 		calls := toolCalls(res.Content)
 		if len(calls) == 0 {
-			return res, nil
+			return RunResult{Response: res, Messages: trace}, nil
 		}
 		for _, call := range calls {
 			tool, ok := a.tools[call.Name]
 			if !ok {
-				messages = append(messages, toolMessage(call, "unknown tool: "+call.Name, true))
+				message := toolMessage(call, "unknown tool: "+call.Name, true)
+				messages = append(messages, message)
+				trace = append(trace, message)
 				continue
 			}
 			output, callErr := tool.Call(ctx, call.Arguments)
 			if callErr != nil {
 				output = callErr.Error()
 			}
-			messages = append(messages, toolMessage(call, output, callErr != nil))
+			message := toolMessage(call, output, callErr != nil)
+			messages = append(messages, message)
+			trace = append(trace, message)
 		}
 	}
-	return nil, fmt.Errorf("agent exceeded max turns")
+	return RunResult{Messages: trace}, fmt.Errorf("agent exceeded max turns")
 }
 
 func (a *Agent) completeWithRetry(ctx context.Context, req provider.Request) (*provider.Response, error) {

@@ -8,13 +8,17 @@ import (
 	"github.com/zhengjiarui/gaia-harness/session"
 )
 
-type Server struct{ Sessions session.Service }
+type Server struct {
+	Sessions session.Service
+	Runner   *session.Runner
+}
 
 func (s Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/sessions", s.create)
 	mux.HandleFunc("GET /v1/sessions/{id}", s.get)
 	mux.HandleFunc("POST /v1/sessions/{id}/messages", s.append)
+	mux.HandleFunc("POST /v1/sessions/{id}/run", s.run)
 	return mux
 }
 func (s Server) create(w http.ResponseWriter, r *http.Request) {
@@ -27,7 +31,12 @@ func (s Server) create(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	write(w, v)
+	created, err := s.Sessions.Store.Get(r.Context(), v.ID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	write(w, created)
 }
 func (s Server) get(w http.ResponseWriter, r *http.Request) {
 	v, err := s.Sessions.Store.Get(r.Context(), r.PathValue("id"))
@@ -48,6 +57,23 @@ func (s Server) append(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	write(w, map[string]string{"status": "ok"})
+}
+func (s Server) run(w http.ResponseWriter, r *http.Request) {
+	if s.Runner == nil {
+		http.Error(w, "agent runner is not configured", http.StatusNotImplemented)
+		return
+	}
+	var message provider.Message
+	if json.NewDecoder(r.Body).Decode(&message) != nil {
+		http.Error(w, "invalid message", http.StatusBadRequest)
+		return
+	}
+	response, err := s.Runner.Run(r.Context(), r.PathValue("id"), message)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	write(w, response)
 }
 func write(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")

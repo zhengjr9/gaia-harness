@@ -55,7 +55,7 @@ func (b *Bwrap) Execute(ctx context.Context, c Command) (Result, error) {
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	args := []string{"--die-with-parent", "--unshare-pid", "--ro-bind", "/usr", "/usr", "--ro-bind", "/bin", "/bin", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--bind", b.cfg.Workspace, "/workspace", "--chdir", "/workspace"}
+	args := []string{"--die-with-parent", "--unshare-pid", "--ro-bind", "/usr", "/usr", "--ro-bind", "/bin", "/bin", "--ro-bind", "/lib", "/lib", "--ro-bind", "/lib64", "/lib64", "--ro-bind", "/sbin", "/sbin", "--ro-bind", "/etc", "/etc", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--bind", b.cfg.Workspace, "/workspace", "--chdir", "/workspace"}
 	if !b.cfg.Network {
 		args = append(args, "--unshare-net")
 	}

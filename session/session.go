@@ -2,6 +2,9 @@ package session
 
 import (
 	"context"
+	"fmt"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -11,12 +14,14 @@ import (
 type ID string
 
 type Record struct {
-	ID, WorkspaceID string
-	Model           provider.Model
-	System          string
-	Messages        []provider.Message
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	ID          string             `json:"id"`
+	WorkspaceID string             `json:"workspace_id"`
+	CWD         string             `json:"cwd,omitempty"`
+	Model       provider.Model     `json:"model"`
+	System      string             `json:"system,omitempty"`
+	Messages    []provider.Message `json:"messages,omitempty"`
+	CreatedAt   time.Time          `json:"created_at,omitempty"`
+	UpdatedAt   time.Time          `json:"updated_at,omitempty"`
 }
 
 type Store interface {
@@ -24,6 +29,9 @@ type Store interface {
 	Get(context.Context, string) (Record, error)
 	Append(context.Context, string, provider.Message) error
 	ReplaceMessages(context.Context, string, []provider.Message) error
+}
+type Lister interface {
+	List(context.Context) ([]Record, error)
 }
 
 type Compressor interface {
@@ -36,6 +44,12 @@ type Service struct {
 }
 
 func (s Service) Create(ctx context.Context, record Record) error {
+	if record.ID == "" || record.WorkspaceID == "" {
+		return fmt.Errorf("session id and workspace_id are required")
+	}
+	if filepath.Base(record.WorkspaceID) != record.WorkspaceID || strings.Contains(record.WorkspaceID, string(filepath.Separator)) {
+		return fmt.Errorf("invalid workspace_id")
+	}
 	if record.CreatedAt.IsZero() {
 		record.CreatedAt = time.Now().UTC()
 	}
@@ -44,8 +58,14 @@ func (s Service) Create(ctx context.Context, record Record) error {
 }
 
 func (s Service) Append(ctx context.Context, id string, message provider.Message) error {
-	if err := s.Store.Append(ctx, id, message); err != nil {
-		return err
+	return s.AppendMessages(ctx, id, []provider.Message{message})
+}
+
+func (s Service) AppendMessages(ctx context.Context, id string, messages []provider.Message) error {
+	for _, message := range messages {
+		if err := s.Store.Append(ctx, id, message); err != nil {
+			return err
+		}
 	}
 	return s.compact(ctx, id)
 }
@@ -85,6 +105,15 @@ func (s *MemoryStore) Get(_ context.Context, id string) (Record, error) {
 		return Record{}, ErrNotFound
 	}
 	return clone(r), nil
+}
+func (s *MemoryStore) List(_ context.Context) ([]Record, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]Record, 0, len(s.records))
+	for _, r := range s.records {
+		out = append(out, clone(r))
+	}
+	return out, nil
 }
 func (s *MemoryStore) Append(_ context.Context, id string, m provider.Message) error {
 	s.mu.Lock()
