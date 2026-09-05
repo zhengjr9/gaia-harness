@@ -14,20 +14,22 @@ import (
 type ID string
 
 type Record struct {
-	ID          string             `json:"id"`
-	WorkspaceID string             `json:"workspace_id"`
-	CWD         string             `json:"cwd,omitempty"`
-	Model       provider.Model     `json:"model"`
-	System      string             `json:"system,omitempty"`
-	Messages    []provider.Message `json:"messages,omitempty"`
-	CreatedAt   time.Time          `json:"created_at,omitempty"`
-	UpdatedAt   time.Time          `json:"updated_at,omitempty"`
+	ID            string             `json:"id"`
+	WorkspaceID   string             `json:"workspace_id"`
+	CWD           string             `json:"cwd,omitempty"`
+	Model         provider.Model     `json:"model"`
+	ThinkingLevel string             `json:"thinking_level,omitempty"`
+	System        string             `json:"system,omitempty"`
+	Messages      []provider.Message `json:"messages,omitempty"`
+	CreatedAt     time.Time          `json:"created_at,omitempty"`
+	UpdatedAt     time.Time          `json:"updated_at,omitempty"`
 }
 
 type Store interface {
 	Create(context.Context, Record) error
 	Get(context.Context, string) (Record, error)
 	UpdateModel(context.Context, string, provider.Model) error
+	UpdateThinking(context.Context, string, string) error
 	Append(context.Context, string, provider.Message) error
 	ReplaceMessages(context.Context, string, []provider.Message) error
 }
@@ -115,6 +117,18 @@ func (s *MemoryStore) UpdateModel(_ context.Context, id string, model provider.M
 		return ErrNotFound
 	}
 	r.Model = model
+	r.UpdatedAt = time.Now().UTC()
+	s.records[id] = r
+	return nil
+}
+func (s *MemoryStore) UpdateThinking(_ context.Context, id, thinking string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.records[id]
+	if !ok {
+		return ErrNotFound
+	}
+	r.ThinkingLevel = thinking
 	r.UpdatedAt = time.Now().UTC()
 	s.records[id] = r
 	return nil

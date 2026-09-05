@@ -111,7 +111,7 @@ func main() {
 		if wasmMiddleware != nil {
 			middleware = append(middleware, wasmMiddleware)
 		}
-		return agent.New(agent.Config{Registry: registry, Model: record.Model, System: record.System, Tools: tools, Middleware: middleware})
+		return agent.New(agent.Config{Registry: registry, Model: record.Model, System: record.System, ThinkingLevel: record.ThinkingLevel, Tools: tools, Middleware: middleware})
 	}}
 	piServer := &protocol.Server{Sessions: service, Runner: runner, Registry: registry, CWD: workspaceRoot}
 	mux := http.NewServeMux()

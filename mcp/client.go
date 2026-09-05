@@ -20,11 +20,12 @@ type Client interface {
 	Close() error
 }
 type StdioClient struct {
-	cmd  *exec.Cmd
-	in   io.WriteCloser
-	out  *bufio.Reader
-	mu   sync.Mutex
-	next int
+	cmd         *exec.Cmd
+	in          io.WriteCloser
+	out         *bufio.Reader
+	mu          sync.Mutex
+	next        int
+	initialized bool
 }
 
 func NewStdio(ctx context.Context, command string, args ...string) (*StdioClient, error) {
@@ -42,9 +43,33 @@ func NewStdio(ctx context.Context, command string, args ...string) (*StdioClient
 	}
 	return &StdioClient{cmd: cmd, in: in, out: bufio.NewReader(out)}, nil
 }
+func (c *StdioClient) ensureInitialized(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.initialized {
+		return nil
+	}
+	if _, err := c.requestLocked(ctx, "initialize", map[string]any{
+		"protocolVersion": "2024-11-05",
+		"capabilities":    map[string]any{},
+		"clientInfo":      map[string]any{"name": "gaia-harness", "version": "0.1.0"},
+	}); err != nil {
+		return err
+	}
+	if _, err := c.in.Write([]byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}` + "\n")); err != nil {
+		return err
+	}
+	c.initialized = true
+	return nil
+}
+
 func (c *StdioClient) request(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.requestLocked(ctx, method, params)
+}
+
+func (c *StdioClient) requestLocked(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	c.next++
 	id := c.next
 	body, _ := json.Marshal(struct {
@@ -57,6 +82,7 @@ func (c *StdioClient) request(ctx context.Context, method string, params any) (j
 		return nil, err
 	}
 	type response struct {
+		ID     int             `json:"id"`
 		Result json.RawMessage `json:"result"`
 		Error  *struct {
 			Message string `json:"message"`
@@ -83,6 +109,9 @@ func (c *StdioClient) request(ctx context.Context, method string, params any) (j
 			if err := json.Unmarshal(line, &r); err != nil {
 				continue
 			}
+			if r.ID != id {
+				continue
+			}
 			if r.Error != nil {
 				return nil, fmt.Errorf("mcp: %s", r.Error.Message)
 			}
@@ -91,6 +120,9 @@ func (c *StdioClient) request(ctx context.Context, method string, params any) (j
 	}
 }
 func (c *StdioClient) ListTools(ctx context.Context) ([]Tool, error) {
+	if err := c.ensureInitialized(ctx); err != nil {
+		return nil, err
+	}
 	raw, err := c.request(ctx, "tools/list", map[string]any{})
 	if err != nil {
 		return nil, err
@@ -102,6 +134,9 @@ func (c *StdioClient) ListTools(ctx context.Context) ([]Tool, error) {
 	return v.Tools, err
 }
 func (c *StdioClient) Call(ctx context.Context, name string, args map[string]any) (any, error) {
+	if err := c.ensureInitialized(ctx); err != nil {
+		return nil, err
+	}
 	raw, err := c.request(ctx, "tools/call", map[string]any{"name": name, "arguments": args})
 	if err != nil {
 		return nil, err

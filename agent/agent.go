@@ -16,14 +16,15 @@ type Middleware interface {
 	After(context.Context, *provider.Response) error
 }
 type Config struct {
-	Registry   *provider.Registry
-	Model      provider.Model
-	System     string
-	Tools      []Tool
-	Middleware []Middleware
-	MaxTurns   int
-	Retries    int
-	RetryDelay time.Duration
+	Registry      *provider.Registry
+	Model         provider.Model
+	System        string
+	ThinkingLevel string
+	Tools         []Tool
+	Middleware    []Middleware
+	MaxTurns      int
+	Retries       int
+	RetryDelay    time.Duration
 }
 
 // EventObserver receives provider stream events while a turn is running.
@@ -47,6 +48,9 @@ func New(cfg Config) (*Agent, error) {
 	if cfg.Model.Provider == "" || cfg.Model.ID == "" {
 		return nil, fmt.Errorf("model provider and id are required")
 	}
+	if catalogModel, ok := cfg.Registry.Model(cfg.Model.Provider, cfg.Model.ID); ok {
+		cfg.Model = mergeModelMetadata(catalogModel, cfg.Model)
+	}
 	if cfg.MaxTurns == 0 {
 		cfg.MaxTurns = 16
 	}
@@ -58,6 +62,32 @@ func New(cfg Config) (*Agent, error) {
 		a.tools[tool.Definition().Name] = tool
 	}
 	return a, nil
+}
+
+func mergeModelMetadata(catalog, requested provider.Model) provider.Model {
+	if requested.Name == "" {
+		requested.Name = catalog.Name
+	}
+	if requested.API == "" {
+		requested.API = catalog.API
+	}
+	if requested.BaseURL == "" {
+		requested.BaseURL = catalog.BaseURL
+	}
+	if requested.ContextWindow <= 0 {
+		requested.ContextWindow = catalog.ContextWindow
+	}
+	if requested.MaxTokens <= 0 {
+		requested.MaxTokens = catalog.MaxTokens
+	}
+	if len(requested.Input) == 0 {
+		requested.Input = append([]string(nil), catalog.Input...)
+	}
+	if requested.Cost == (provider.Cost{}) {
+		requested.Cost = catalog.Cost
+	}
+	requested.Reasoning = requested.Reasoning || catalog.Reasoning
+	return requested
 }
 
 func (a *Agent) Complete(ctx context.Context, messages []provider.Message) (*provider.Response, error) {
@@ -79,7 +109,7 @@ func (a *Agent) Run(ctx context.Context, messages []provider.Message) (RunResult
 func (a *Agent) RunWithEvents(ctx context.Context, messages []provider.Message, observer EventObserver) (RunResult, error) {
 	trace := []provider.Message{}
 	for turn := 0; turn < a.cfg.MaxTurns; turn++ {
-		req := provider.Request{Model: a.cfg.Model, System: a.cfg.System, Messages: messages, Tools: a.definitions()}
+		req := provider.Request{Model: a.cfg.Model, System: a.cfg.System, Reasoning: a.cfg.ThinkingLevel, Messages: messages, Tools: a.definitions()}
 		for _, middleware := range a.cfg.Middleware {
 			if err := middleware.Before(ctx, &req); err != nil {
 				return RunResult{}, err
@@ -102,11 +132,17 @@ func (a *Agent) RunWithEvents(ctx context.Context, messages []provider.Message, 
 			return RunResult{Response: res, Messages: trace}, nil
 		}
 		for _, call := range calls {
+			if observer != nil {
+				observer(provider.Event{Type: provider.EventToolStart, ToolCall: &call})
+			}
 			tool, ok := a.tools[call.Name]
 			if !ok {
 				message := toolMessage(call, "unknown tool: "+call.Name, true)
 				messages = append(messages, message)
 				trace = append(trace, message)
+				if observer != nil {
+					observer(provider.Event{Type: provider.EventToolEnd, ToolCall: &call, ToolResult: message.Content[0].ToolResult})
+				}
 				continue
 			}
 			output, callErr := tool.Call(ctx, call.Arguments)
@@ -116,6 +152,9 @@ func (a *Agent) RunWithEvents(ctx context.Context, messages []provider.Message, 
 			message := toolMessage(call, output, callErr != nil)
 			messages = append(messages, message)
 			trace = append(trace, message)
+			if observer != nil {
+				observer(provider.Event{Type: provider.EventToolEnd, ToolCall: &call, ToolResult: message.Content[0].ToolResult})
+			}
 		}
 	}
 	return RunResult{Messages: trace}, fmt.Errorf("agent exceeded max turns")

@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 )
 
 // Local is a development fallback for hosts without bubblewrap (for example macOS).
@@ -21,18 +20,22 @@ func NewLocal(root string) (*Local, error) {
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return nil, err
 	}
-	return &Local{root: root}, nil
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return nil, err
+	}
+	return &Local{root: resolved}, nil
 }
 func (l *Local) Workspace() string { return l.root }
 func (l *Local) Read(_ context.Context, p string) ([]byte, error) {
-	full, err := l.safePath(p)
+	full, err := securePath(l.root, p, false)
 	if err != nil {
 		return nil, err
 	}
 	return os.ReadFile(full)
 }
 func (l *Local) Write(_ context.Context, p string, b []byte) error {
-	full, err := l.safePath(p)
+	full, err := securePath(l.root, p, true)
 	if err != nil {
 		return err
 	}
@@ -44,12 +47,17 @@ func (l *Local) Write(_ context.Context, p string, b []byte) error {
 func (l *Local) Execute(ctx context.Context, c Command) (Result, error) {
 	if c.Dir != "" {
 		var err error
-		c.Dir, err = l.safePath(c.Dir)
+		c.Dir, err = securePath(l.root, c.Dir, false)
 		if err != nil {
 			return Result{}, err
 		}
 	} else {
 		c.Dir = l.root
+	}
+	if c.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.Timeout)
+		defer cancel()
 	}
 	cmd := exec.CommandContext(ctx, c.Program, c.Args...)
 	cmd.Dir = c.Dir
@@ -65,6 +73,9 @@ func (l *Local) Execute(ctx context.Context, c Command) (Result, error) {
 	res := Result{Stdout: out.String(), Stderr: stderr.String()}
 	if e, ok := err.(*exec.ExitError); ok {
 		res.ExitCode = e.ExitCode()
+	}
+	if ctx.Err() != nil {
+		return res, ctx.Err()
 	}
 	return res, err
 }
@@ -86,13 +97,4 @@ func (l *Local) ListSkills(_ context.Context) ([]string, error) {
 		}
 	}
 	return out, nil
-}
-func (l *Local) safePath(p string) (string, error) {
-	clean := filepath.Clean("/" + p)
-	full := filepath.Join(l.root, strings.TrimPrefix(clean, "/"))
-	rel, err := filepath.Rel(l.root, full)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("path escapes workspace: %s", p)
-	}
-	return full, nil
 }

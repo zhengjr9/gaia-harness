@@ -247,16 +247,16 @@ func (s *Server) create(r *http.Request, c Command) (SessionSnapshot, error) {
 	if model.Provider == "" || model.ID == "" {
 		model = s.defaultModel()
 	}
-	record := session.Record{ID: id, WorkspaceID: id, CWD: cwd, Model: model, System: "You are a reliable coding agent. Use the available sandbox tools when needed."}
+	thinkingLevel := c.ThinkingLevel
+	if thinkingLevel == "" {
+		thinkingLevel = "off"
+	}
+	record := session.Record{ID: id, WorkspaceID: id, CWD: cwd, Model: model, ThinkingLevel: thinkingLevel, System: "You are a reliable coding agent. Use the available sandbox tools when needed."}
 	if err := s.Sessions.Create(r.Context(), record); err != nil {
 		return SessionSnapshot{}, err
 	}
 	now := time.Now().UnixMilli()
 	s.mu.Lock()
-	thinkingLevel := c.ThinkingLevel
-	if thinkingLevel == "" {
-		thinkingLevel = "off"
-	}
 	s.states[id] = sessionState{Metadata: SessionMetadata{ID: id, CWD: cwd, CreatedAt: now, UpdatedAt: now}, Model: model, Name: c.Name, ThinkingLevel: thinkingLevel}
 	s.mu.Unlock()
 	return s.get(r, id)

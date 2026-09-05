@@ -255,6 +255,27 @@ type nativeProgressState struct {
 }
 
 func (s *nativeProgressState) apply(event provider.Event) {
+	if event.Type == provider.EventToolStart && event.ToolCall != nil {
+		s.sequence++
+		input := map[string]any{}
+		_ = json.Unmarshal([]byte(event.ToolCall.Arguments), &input)
+		s.item = nativeTranscriptItem{ID: fmt.Sprintf("tool-%s-%d", s.sessionID, s.sequence), Role: string(provider.RoleTool), Content: []map[string]any{}, ToolCallID: event.ToolCall.ID, ToolName: event.ToolCall.Name, Input: input, Status: "running", Timestamp: time.Now().UnixMilli()}
+		s.progress = map[string]any{"type": "item_started", "item": s.item}
+		return
+	}
+	if event.Type == provider.EventToolEnd && event.ToolCall != nil && event.ToolResult != nil {
+		s.item.ToolCallID = event.ToolCall.ID
+		s.item.ToolName = event.ToolCall.Name
+		s.item.Content = []map[string]any{{"type": "text", "text": event.ToolResult.Content}}
+		s.item.IsError = event.ToolResult.IsError
+		if event.ToolResult.IsError {
+			s.item.Status = "error"
+		} else {
+			s.item.Status = "complete"
+		}
+		s.progress = map[string]any{"type": "item_finished", "item": s.item}
+		return
+	}
 	if event.Type == provider.EventStart {
 		s.sequence++
 		id := fmt.Sprintf("stream-%s-%d", s.sessionID, s.sequence)
@@ -378,6 +399,9 @@ func (s *Server) setThinking(ctx context.Context, id, thinking string) error {
 	case "off", "minimal", "low", "medium", "high", "xhigh", "max":
 	default:
 		return fmt.Errorf("invalid thinking level %q", thinking)
+	}
+	if err := s.Sessions.Store.UpdateThinking(ctx, id, thinking); err != nil {
+		return err
 	}
 	s.mu.Lock()
 	state, ok := s.states[id]

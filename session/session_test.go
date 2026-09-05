@@ -60,3 +60,21 @@ func TestWorkspaceIDCannotEscapeRoot(t *testing.T) {
 		t.Fatal("expected workspace traversal to be rejected")
 	}
 }
+
+func TestThinkingLevelPersistsInMemoryStore(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	if err := (Service{Store: store}).Create(ctx, Record{ID: "thinking", WorkspaceID: "thinking", ThinkingLevel: "off"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateThinking(ctx, "thinking", "high"); err != nil {
+		t.Fatal(err)
+	}
+	r, err := store.Get(ctx, "thinking")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.ThinkingLevel != "high" {
+		t.Fatalf("thinking level=%q", r.ThinkingLevel)
+	}
+}

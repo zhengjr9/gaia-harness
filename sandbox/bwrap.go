@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 )
 
 type Bwrap struct{ cfg Config }
@@ -19,6 +18,11 @@ func NewBwrap(cfg Config) (*Bwrap, error) {
 	if err := os.MkdirAll(cfg.Workspace, 0700); err != nil {
 		return nil, err
 	}
+	resolved, err := filepath.EvalSymlinks(cfg.Workspace)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Workspace = resolved
 	if cfg.BwrapPath == "" {
 		cfg.BwrapPath = "bwrap"
 	}
@@ -26,14 +30,14 @@ func NewBwrap(cfg Config) (*Bwrap, error) {
 }
 func (b *Bwrap) Workspace() string { return b.cfg.Workspace }
 func (b *Bwrap) Read(ctx context.Context, path string) ([]byte, error) {
-	p, err := b.safePath(path)
+	p, err := securePath(b.cfg.Workspace, path, false)
 	if err != nil {
 		return nil, err
 	}
 	return os.ReadFile(p)
 }
 func (b *Bwrap) Write(ctx context.Context, path string, data []byte) error {
-	p, err := b.safePath(path)
+	p, err := securePath(b.cfg.Workspace, path, true)
 	if err != nil {
 		return err
 	}
@@ -55,7 +59,21 @@ func (b *Bwrap) Execute(ctx context.Context, c Command) (Result, error) {
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	args := []string{"--die-with-parent", "--unshare-pid", "--ro-bind", "/usr", "/usr", "--ro-bind", "/bin", "/bin", "--ro-bind", "/lib", "/lib", "--ro-bind", "/lib64", "/lib64", "--ro-bind", "/sbin", "/sbin", "--ro-bind", "/etc", "/etc", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--bind", b.cfg.Workspace, "/workspace", "--chdir", "/workspace"}
+	workdir := "/workspace"
+	if c.Dir != "" {
+		resolved, err := securePath(b.cfg.Workspace, c.Dir, false)
+		if err != nil {
+			return Result{}, err
+		}
+		rel, err := filepath.Rel(b.cfg.Workspace, resolved)
+		if err != nil || rel == ".." || len(rel) >= 2 && rel[:2] == ".." {
+			return Result{}, fmt.Errorf("command directory escapes workspace: %s", c.Dir)
+		}
+		if rel != "." {
+			workdir = filepath.Join("/workspace", rel)
+		}
+	}
+	args := []string{"--die-with-parent", "--unshare-pid", "--ro-bind", "/usr", "/usr", "--ro-bind", "/bin", "/bin", "--ro-bind", "/lib", "/lib", "--ro-bind", "/lib64", "/lib64", "--ro-bind", "/sbin", "/sbin", "--ro-bind", "/etc", "/etc", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--bind", b.cfg.Workspace, "/workspace", "--chdir", workdir}
 	if !b.cfg.Network {
 		args = append(args, "--unshare-net")
 	}
@@ -98,13 +116,4 @@ func (b *Bwrap) ListSkills(_ context.Context) ([]string, error) {
 		}
 	}
 	return out, nil
-}
-func (b *Bwrap) safePath(path string) (string, error) {
-	clean := filepath.Clean("/" + path)
-	full := filepath.Join(b.cfg.Workspace, strings.TrimPrefix(clean, "/"))
-	rel, err := filepath.Rel(b.cfg.Workspace, full)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("path escapes workspace: %s", path)
-	}
-	return full, nil
 }
