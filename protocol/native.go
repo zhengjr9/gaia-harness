@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
@@ -23,6 +25,9 @@ func (s *Server) NativeHandler() http.Handler {
 	}
 	if s.states == nil {
 		s.states = map[string]sessionState{}
+	}
+	if s.runs == nil {
+		s.runs = map[string]context.CancelFunc{}
 	}
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -85,7 +90,13 @@ func (s *Server) nativeConnection(ctx context.Context, conn *websocket.Conn) err
 	if hello.Type != "hello" || hello.Version != Version {
 		return s.writeNative(conn, nativeServerMessage{Type: "hello_error", Error: &ProtocolError{Code: "version", Message: "unsupported protocol version"}})
 	}
-	if err := s.writeNative(conn, nativeServerMessage{Type: "hello", Version: Version, ConnectionID: fmt.Sprintf("ws-%d", time.Now().UnixNano()), Snapshot: nativeSnapshot(s.snapshot(ctx))}); err != nil {
+	var writeMu sync.Mutex
+	write := func(message nativeServerMessage) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return s.writeNative(conn, message)
+	}
+	if err := write(nativeServerMessage{Type: "hello", Version: Version, ConnectionID: fmt.Sprintf("ws-%d", time.Now().UnixNano()), Snapshot: nativeSnapshot(s.snapshot(ctx))}); err != nil {
 		return err
 	}
 	for {
@@ -108,30 +119,49 @@ func (s *Server) nativeConnection(ctx context.Context, conn *websocket.Conn) err
 			if message.Type != "request" {
 				continue
 			}
-			progress := s.nativeProgressEmitter(message.Request.SessionID, func(serverMessage nativeServerMessage) error {
-				return s.writeNative(conn, serverMessage)
-			})
-			result, commandErr := s.commandForNative(ctx, message.Request, progress)
-			ok := commandErr == nil
-			response := nativeServerMessage{Type: "response", ID: message.ID, OK: &ok}
-			if commandErr == nil {
-				response.Result = result
-			}
-			if commandErr != nil {
-				response.Error = &ProtocolError{Code: "internal_error", Message: commandErr.Error()}
-			}
-			if commandErr == nil {
-				if snapshot, ok := nativeSessionFromResult(result); ok {
-					if err := s.writeNative(conn, nativeServerMessage{Type: "event", Event: map[string]any{"type": "session_snapshot", "snapshot": snapshot}}); err != nil {
-						return err
-					}
-				}
-			}
-			if err := s.writeNative(conn, response); err != nil {
-				return err
+			go s.handleNativeRequest(ctx, message, write)
+		}
+	}
+}
+
+func (s *Server) handleNativeRequest(ctx context.Context, message nativeClientMessage, write func(nativeServerMessage) error) {
+	requestContext := ctx
+	finish := func() {}
+	if message.Request.Command == "prompt" || message.Request.Command == "steer" {
+		var err error
+		requestContext, finish, err = s.startRun(ctx, message.Request.SessionID)
+		if err != nil {
+			s.writeNativeError(message.ID, err, write)
+			return
+		}
+	}
+	defer finish()
+	progress := s.nativeProgressEmitter(message.Request.SessionID, write)
+	result, commandErr := s.commandForNative(requestContext, message.Request, progress)
+	ok := commandErr == nil
+	response := nativeServerMessage{Type: "response", ID: message.ID, OK: &ok}
+	if commandErr == nil {
+		response.Result = result
+	} else {
+		code := "internal_error"
+		if errors.Is(commandErr, context.Canceled) {
+			code = "aborted"
+		}
+		response.Error = &ProtocolError{Code: code, Message: commandErr.Error()}
+	}
+	if commandErr == nil {
+		if snapshot, ok := nativeSessionFromResult(result); ok {
+			if err := write(nativeServerMessage{Type: "event", Event: map[string]any{"type": "session_snapshot", "snapshot": snapshot}}); err != nil {
+				return
 			}
 		}
 	}
+	_ = write(response)
+}
+
+func (s *Server) writeNativeError(id string, commandErr error, write func(nativeServerMessage) error) {
+	ok := false
+	_ = write(nativeServerMessage{Type: "response", ID: id, OK: &ok, Error: &ProtocolError{Code: "internal_error", Message: commandErr.Error()}})
 }
 
 func nativeSessionFromResult(result any) (nativeSessionSnapshot, bool) {
@@ -162,6 +192,7 @@ func (s *Server) commandForNative(ctx context.Context, command nativeCommand, ob
 		snapshot, err := s.nativePrompt(request, command, observer)
 		return map[string]any{"command": command.Command, "session": nativeSession(snapshot)}, err
 	case "abort":
+		s.abortRun(command.SessionID)
 		snapshot, err := s.get(request, command.SessionID)
 		return map[string]any{"command": "abort", "session": nativeSession(snapshot)}, err
 	case "set_model":

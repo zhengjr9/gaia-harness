@@ -106,6 +106,39 @@ type Server struct {
 	CWD      string
 	mu       sync.RWMutex
 	states   map[string]sessionState
+	runs     map[string]context.CancelFunc
+}
+
+func (s *Server) startRun(parent context.Context, id string) (context.Context, func(), error) {
+	if id == "" {
+		return nil, nil, fmt.Errorf("sessionId is required")
+	}
+	ctx, cancel := context.WithCancel(parent)
+	s.mu.Lock()
+	if existing := s.runs[id]; existing != nil {
+		s.mu.Unlock()
+		cancel()
+		return nil, nil, fmt.Errorf("session %s is already running", id)
+	}
+	s.runs[id] = cancel
+	s.mu.Unlock()
+	return ctx, func() {
+		cancel()
+		s.mu.Lock()
+		delete(s.runs, id)
+		s.mu.Unlock()
+	}, nil
+}
+
+func (s *Server) abortRun(id string) bool {
+	s.mu.RLock()
+	cancel := s.runs[id]
+	s.mu.RUnlock()
+	if cancel == nil {
+		return false
+	}
+	cancel()
+	return true
 }
 
 func (s *Server) Handler() http.Handler {
@@ -114,6 +147,9 @@ func (s *Server) Handler() http.Handler {
 	}
 	if s.states == nil {
 		s.states = map[string]sessionState{}
+	}
+	if s.runs == nil {
+		s.runs = map[string]context.CancelFunc{}
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/pi/hello", s.hello)
