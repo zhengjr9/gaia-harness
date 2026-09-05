@@ -2,8 +2,13 @@ package skills
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+
+	provider "github.com/zhengjiarui/gaia-ai-provider"
+	"github.com/zhengjiarui/gaia-harness/agent"
 )
 
 type Skill struct{ Name, Description, Path, Instructions string }
@@ -45,4 +50,55 @@ func (f Filesystem) Load(ctx context.Context, name string) (Skill, error) {
 		}
 	}
 	return Skill{}, os.ErrNotExist
+}
+
+// Tools exposes skills through the same tool interface as the sandbox. The
+// agent can discover a skill first and load its instructions only when needed.
+type Tool struct {
+	Loader Loader
+	Name   string
+}
+
+func (t Tool) Definition() provider.Tool {
+	if t.Name == "list_skills" {
+		return provider.Tool{Name: t.Name, Description: "List skills available in the session workspace.", Parameters: map[string]any{"type": "object", "properties": map[string]any{}}}
+	}
+	return provider.Tool{
+		Name:        t.Name,
+		Description: "Load the instructions for a named skill from the session workspace.",
+		Parameters: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"name": map[string]any{"type": "string"}},
+			"required":   []string{"name"},
+		},
+	}
+}
+
+func (t Tool) Call(ctx context.Context, arguments string) (string, error) {
+	if t.Name == "list_skills" {
+		items, err := t.Loader.List(ctx)
+		if err != nil {
+			return "", err
+		}
+		data, err := json.Marshal(items)
+		return string(data), err
+	}
+	var input struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal([]byte(arguments), &input); err != nil {
+		return "", err
+	}
+	if input.Name == "" {
+		return "", fmt.Errorf("skill name is required")
+	}
+	skill, err := t.Loader.Load(ctx, input.Name)
+	if err != nil {
+		return "", err
+	}
+	return skill.Instructions, nil
+}
+
+func Tools(loader Loader) []agent.Tool {
+	return []agent.Tool{Tool{Loader: loader, Name: "list_skills"}, Tool{Loader: loader, Name: "load_skill"}}
 }

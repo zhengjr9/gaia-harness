@@ -61,5 +61,10 @@ func (t Tool) Call(ctx context.Context, arguments string) (string, error) {
 	}
 }
 func Tools(s Sandbox) []agent.Tool {
-	return []agent.Tool{Tool{Sandbox: s, Name: "read_file"}, Tool{Sandbox: s, Name: "write_file"}, Tool{Sandbox: s, Name: "bash"}, Tool{Sandbox: s, Name: "python"}}
+	return []agent.Tool{
+		Tool{Sandbox: s, Name: "read_file"},
+		Tool{Sandbox: s, Name: "write_file"},
+		Tool{Sandbox: s, Name: "bash"},
+		Tool{Sandbox: s, Name: "python"},
+	}
 }

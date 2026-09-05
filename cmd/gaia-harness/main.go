@@ -1,19 +1,24 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"flag"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	provider "github.com/zhengjiarui/gaia-ai-provider"
 	"github.com/zhengjiarui/gaia-harness/agent"
 	"github.com/zhengjiarui/gaia-harness/httpapi"
+	"github.com/zhengjiarui/gaia-harness/mcp"
 	"github.com/zhengjiarui/gaia-harness/protocol"
 	"github.com/zhengjiarui/gaia-harness/sandbox"
 	"github.com/zhengjiarui/gaia-harness/session"
+	"github.com/zhengjiarui/gaia-harness/skills"
+	"github.com/zhengjiarui/gaia-harness/wasmext"
 	_ "modernc.org/sqlite"
 )
 
@@ -59,6 +64,30 @@ func main() {
 		providers = append(providers, provider.NewOpenAI(provider.OpenAIConfig{ID: modelProvider, Name: modelProvider, BaseURL: baseURL, APIKey: os.Getenv("GAIA_API_KEY"), Models: []provider.Model{{ID: modelID, Name: modelID, Provider: modelProvider, ContextWindow: 128000, MaxTokens: 8192}}}))
 	}
 	registry := provider.NewRegistry(providers...)
+	var sharedMCP mcp.Client
+	var sharedMCPTools []agent.Tool
+	if command := strings.TrimSpace(os.Getenv("GAIA_MCP_COMMAND")); command != "" {
+		parts := strings.Fields(command)
+		sharedMCP, err = mcp.NewStdio(context.Background(), parts[0], parts[1:]...)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer sharedMCP.Close()
+		sharedMCPTools, err = mcp.AgentTools(context.Background(), sharedMCP)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+	var wasmMiddleware agent.Middleware
+	var wasmHook *wasmext.WasmHook
+	if path := strings.TrimSpace(os.Getenv("GAIA_WASM_HOOK")); path != "" {
+		wasmHook, err = wasmext.Load(context.Background(), path)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer wasmHook.Close(context.Background())
+		wasmMiddleware = wasmext.AgentMiddleware{Hook: wasmHook}
+	}
 	service := session.Service{Store: store, Compressor: session.TokenCompressor{ReserveOutput: 8192, SummaryPrefix: "Earlier context was compacted; rely on the retained transcript."}}
 	runner := &session.Runner{Store: store, Service: service, NewAgent: func(record session.Record) (*agent.Agent, error) {
 		workspace := record.CWD
@@ -75,7 +104,14 @@ func main() {
 		if err != nil {
 			return nil, err
 		}
-		return agent.New(agent.Config{Registry: registry, Model: record.Model, System: record.System, Tools: sandbox.Tools(sb)})
+		loader := skills.Filesystem{Root: filepath.Join(workspace, "skills")}
+		tools := append(sandbox.Tools(sb), skills.Tools(loader)...)
+		tools = append(tools, sharedMCPTools...)
+		middleware := []agent.Middleware{}
+		if wasmMiddleware != nil {
+			middleware = append(middleware, wasmMiddleware)
+		}
+		return agent.New(agent.Config{Registry: registry, Model: record.Model, System: record.System, Tools: tools, Middleware: middleware})
 	}}
 	piServer := &protocol.Server{Sessions: service, Runner: runner, Registry: registry, CWD: workspaceRoot}
 	mux := http.NewServeMux()
