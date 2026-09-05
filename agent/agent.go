@@ -15,6 +15,9 @@ type Middleware interface {
 	Before(context.Context, *provider.Request) error
 	After(context.Context, *provider.Response) error
 }
+type Logger interface {
+	Printf(string, ...any)
+}
 type Config struct {
 	Registry      *provider.Registry
 	Model         provider.Model
@@ -22,6 +25,8 @@ type Config struct {
 	ThinkingLevel string
 	Tools         []Tool
 	Middleware    []Middleware
+	Logger        Logger
+	SessionID     string
 	MaxTurns      int
 	Retries       int
 	RetryDelay    time.Duration
@@ -107,6 +112,7 @@ func (a *Agent) Run(ctx context.Context, messages []provider.Message) (RunResult
 // RunWithEvents executes the same durable tool loop as Run and optionally
 // exposes each provider stream event before the final trace is persisted.
 func (a *Agent) RunWithEvents(ctx context.Context, messages []provider.Message, observer EventObserver) (RunResult, error) {
+	a.logf("agent run start provider=%s model=%s messages=%d", a.cfg.Model.Provider, a.cfg.Model.ID, len(messages))
 	trace := []provider.Message{}
 	for turn := 0; turn < a.cfg.MaxTurns; turn++ {
 		req := provider.Request{Model: a.cfg.Model, System: a.cfg.System, Reasoning: a.cfg.ThinkingLevel, Messages: messages, Tools: a.definitions()}
@@ -117,6 +123,7 @@ func (a *Agent) RunWithEvents(ctx context.Context, messages []provider.Message, 
 		}
 		res, err := a.completeWithRetry(ctx, req, observer)
 		if err != nil {
+			a.logf("provider error provider=%s model=%s turn=%d err=%v", req.Model.Provider, req.Model.ID, turn+1, err)
 			return RunResult{}, err
 		}
 		for _, middleware := range a.cfg.Middleware {
@@ -129,9 +136,11 @@ func (a *Agent) RunWithEvents(ctx context.Context, messages []provider.Message, 
 		trace = append(trace, assistant)
 		calls := toolCalls(res.Content)
 		if len(calls) == 0 {
+			a.logf("agent run complete provider=%s model=%s turns=%d", a.cfg.Model.Provider, a.cfg.Model.ID, turn+1)
 			return RunResult{Response: res, Messages: trace}, nil
 		}
 		for _, call := range calls {
+			a.logf("tool start name=%s turn=%d", call.Name, turn+1)
 			if observer != nil {
 				observer(provider.Event{Type: provider.EventToolStart, ToolCall: &call})
 			}
@@ -143,6 +152,7 @@ func (a *Agent) RunWithEvents(ctx context.Context, messages []provider.Message, 
 				if observer != nil {
 					observer(provider.Event{Type: provider.EventToolEnd, ToolCall: &call, ToolResult: message.Content[0].ToolResult})
 				}
+				a.logf("tool end name=%s error=unknown tool", call.Name)
 				continue
 			}
 			output, callErr := tool.Call(ctx, call.Arguments)
@@ -155,9 +165,23 @@ func (a *Agent) RunWithEvents(ctx context.Context, messages []provider.Message, 
 			if observer != nil {
 				observer(provider.Event{Type: provider.EventToolEnd, ToolCall: &call, ToolResult: message.Content[0].ToolResult})
 			}
+			if callErr != nil {
+				a.logf("tool end name=%s error=%v", call.Name, callErr)
+			} else {
+				a.logf("tool end name=%s", call.Name)
+			}
 		}
 	}
 	return RunResult{Messages: trace}, fmt.Errorf("agent exceeded max turns")
+}
+
+func (a *Agent) logf(format string, args ...any) {
+	if a.cfg.Logger != nil {
+		if a.cfg.SessionID != "" {
+			format = "session=" + a.cfg.SessionID + " " + format
+		}
+		a.cfg.Logger.Printf(format, args...)
+	}
 }
 
 func (a *Agent) completeWithRetry(ctx context.Context, req provider.Request, observer EventObserver) (*provider.Response, error) {
@@ -180,8 +204,14 @@ func (a *Agent) completeWithRetry(ctx context.Context, req provider.Request, obs
 }
 
 func (a *Agent) complete(ctx context.Context, req provider.Request, observer EventObserver) (*provider.Response, error) {
+	a.logf("provider request provider=%s model=%s streaming=%t", req.Model.Provider, req.Model.ID, observer != nil)
 	if observer == nil {
-		return a.cfg.Registry.Complete(ctx, req)
+		response, err := a.cfg.Registry.Complete(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		a.logf("provider response provider=%s model=%s", req.Model.Provider, req.Model.ID)
+		return response, nil
 	}
 	providerClient, ok := a.cfg.Registry.Get(req.Model.Provider)
 	if !ok {

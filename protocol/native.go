@@ -125,6 +125,8 @@ func (s *Server) nativeConnection(ctx context.Context, conn *websocket.Conn) err
 }
 
 func (s *Server) handleNativeRequest(ctx context.Context, message nativeClientMessage, write func(nativeServerMessage) error) {
+	started := time.Now()
+	s.logf("native request id=%s command=%s session=%s", message.ID, message.Request.Command, message.Request.SessionID)
 	requestContext := ctx
 	finish := func() {}
 	if message.Request.Command == "prompt" || message.Request.Command == "steer" {
@@ -157,6 +159,13 @@ func (s *Server) handleNativeRequest(ctx context.Context, message nativeClientMe
 		}
 	}
 	_ = write(response)
+	s.logf("native response id=%s command=%s session=%s ok=%t duration=%s", message.ID, message.Request.Command, message.Request.SessionID, ok, time.Since(started))
+}
+
+func (s *Server) logf(format string, args ...any) {
+	if s.Logger != nil {
+		s.Logger.Printf(format, args...)
+	}
 }
 
 func (s *Server) writeNativeError(id string, commandErr error, write func(nativeServerMessage) error) {

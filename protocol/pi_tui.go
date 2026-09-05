@@ -104,6 +104,7 @@ type Server struct {
 	Runner   *session.Runner
 	Registry *provider.Registry
 	CWD      string
+	Logger   interface{ Printf(string, ...any) }
 	mu       sync.RWMutex
 	states   map[string]sessionState
 	runs     map[string]context.CancelFunc

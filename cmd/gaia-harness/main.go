@@ -23,6 +23,7 @@ import (
 )
 
 func main() {
+	logger := log.New(os.Stderr, "gaia-harness ", log.LstdFlags|log.Lmicroseconds)
 	addr := flag.String("addr", ":8080", "listen address")
 	dbPath := flag.String("db", "gaia-harness.db", "sqlite database path")
 	flag.Parse()
@@ -111,13 +112,14 @@ func main() {
 		if wasmMiddleware != nil {
 			middleware = append(middleware, wasmMiddleware)
 		}
-		return agent.New(agent.Config{Registry: registry, Model: record.Model, System: record.System, ThinkingLevel: record.ThinkingLevel, Tools: tools, Middleware: middleware})
+		return agent.New(agent.Config{Registry: registry, Model: record.Model, System: record.System, ThinkingLevel: record.ThinkingLevel, Tools: tools, Middleware: middleware, Logger: logger, SessionID: record.ID})
 	}}
-	piServer := &protocol.Server{Sessions: service, Runner: runner, Registry: registry, CWD: workspaceRoot}
+	piServer := &protocol.Server{Sessions: service, Runner: runner, Registry: registry, CWD: workspaceRoot, Logger: logger}
 	mux := http.NewServeMux()
 	mux.Handle("/v1/pi", piServer.NativeHandler())
-	mux.Handle("/v1/sessions", (httpapi.Server{Sessions: service, Runner: runner}).Handler())
-	mux.Handle("/v1/sessions/", (httpapi.Server{Sessions: service, Runner: runner}).Handler())
-	log.Printf("gaia-harness listening on %s (cwd workspace: %s)", *addr, workspaceRoot)
-	log.Fatal(http.ListenAndServe(*addr, mux))
+	api := httpapi.LoggingMiddleware(logger, (httpapi.Server{Sessions: service, Runner: runner}).Handler())
+	mux.Handle("/v1/sessions", api)
+	mux.Handle("/v1/sessions/", api)
+	logger.Printf("gaia-harness listening on %s (cwd workspace: %s, provider=%s, model=%s)", *addr, workspaceRoot, modelProvider, modelID)
+	logger.Fatal(http.ListenAndServe(*addr, mux))
 }
